@@ -1,0 +1,229 @@
+---
+title: "Burden Testing for Germline Variants in Pediatric AML"
+output: html_document
+date: "2025-04-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The following documentation shows the methodology for burden testing of germline 
+variants in pediatric acute myeloid leukemia as compared to healthy controls from 
+the 1000 Genomes Project, as described in Harmon, et. al, 2025: "Germline Variant 
+Burden Warrants Universal Genetic Testing in Pediatric Myeloid Leukemia".
+
+## Background: Burden Testing for Germline Predisposition Variants
+We used burden testing to analyze the contributions of inherited germline variants 
+to disease risk, comparing the frequency of how often these variants occur in 
+patients as compared to a general population. Burden testing offers an advantage over
+comparing individual variants, since many deleterious variants are
+rare. By aggregating by gene or groups of genes, this increases statistical power
+to determine overall significance. Here, we employ burden testing by comparing
+how many putative loss of function (pLOF) variants occur in genes that are related to 
+AML predisposition, with the hypothesis that AML patients will have more pLOF variants
+than the general population. We used healthy control subjects from the 1000 Genomes
+Project as the control population. We looked at genes that are thought to contribute
+to AML predisposition as well as randomly-selected genes. The following files contain
+pLOF variants with a GnomAD frequency < 0.001 for these genes in AML and control subjects, 
+as determined using Ensemble's Variant Effect Predictor.
+
+Load the data and covariates.
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+aml <- read_tsv("candidate_aml_genes_lof_variants.tsv")
+random <- read_tsv("random_genes_lof_variants.tsv")
+
+#Split the AML genes into genes that are established in the literature to be 
+#involved in predisposition and candidate genes.
+established.genes <- read_csv("established_myeloid_genes.csv")
+est.ad <- established.genes[grepl("AD",established.genes$Inheritance),]
+
+aml.est <- aml[aml$SYMBOL %in% established.genes$Gene,]
+aml.est$Sample_Gene <- paste0(aml.est$sampleNames,"_",aml.est$SYMBOL)
+table(aml.est$Sample_Gene) %>% sort()
+#Since there are no double hits we only need to consider genes with dominant inheritance
+#for the established group.
+aml.est <- aml.est[aml.est$SYMBOL %in% est.ad$Gene,]
+aml.cand <- aml[!aml$SYMBOL %in% est.ad$Gene,]
+
+samples <- read_tsv("samples_disease_status.txt")
+```
+
+
+Calculate odds ratios and confidence intervals for each group of genes using a binomial model.
+```{r, warning=FALSE, message=FALSE}
+calcOddsRatio <- function(df){
+  counts <- samples %>% dplyr::select(sampleNames,disease)
+  counts$variant <- as.vector(table(df$sampleNames)[counts$sampleNames])
+  counts$variant[is.na(counts$variant)] <- 0
+  counts$variant[counts$variant >1] <- 1
+  counts$disease <- as.factor(counts$disease)
+  binom.fit <- glm(variant ~ disease, data=counts, family=binomial)  
+  library(questionr)
+  print(odds.ratio(binom.fit))
+}
+
+calcOddsRatio(aml.est)
+calcOddsRatio(aml.cand)
+calcOddsRatio(random)
+```
+
+The odds ratio for established AML genes is 7.2 (95% CI: (3.3, 15.4)). 
+The p-value for established AML genes between pAML patients and 1KG controls is 4.394e-07.
+
+The odds ratio for candidate AML genes is 2.4 (95% CI: (1.7,3.4)).
+The p-value for candidate AML genes between pAML patients and 1KG controls is 2.763e-07.
+
+The odds ratio for randomly-selected genes is 1.7(95% CI: (1.1,2.5)).
+The p-value for randomly-selected genes between pAML patients and 1KG controls is 0.01133.
+
+
+This shows that pLOF variants are enriched in AML patients, most notably in genes
+that are established or candidate for AML predisposition.
+
+Now compute odds ratio and confidence intervals using resampling.
+```{r, warning=FALSE, message=FALSE}
+bootstrap_resample <- function(controlCounts,amlCounts) {
+  control_size <- nrow(controlCounts)
+  control_sample <- controlCounts[sample(seq(1:nrow(controlCounts)), size = control_size, replace=TRUE),]
+  aml_size <- nrow(amlCounts)
+  aml_sample <- amlCounts[sample(seq(1:nrow(amlCounts)), size = aml_size, replace=TRUE),]
+  mean_control <- mean(control_sample$n)
+  mean_aml <- mean(aml_sample$n)
+  OR <- mean_aml / mean_control
+  return(OR)
+}
+
+processResamples <- function(df){
+  bySample <- df %>% group_by(sampleNames,disease) %>% summarize(n=n())
+  sampleCounts <- left_join(samples,bySample)
+  sampleCounts$n[is.na(sampleCounts$n)] <- 0
+  controlCounts <- sampleCounts[sampleCounts$disease == "Control",]
+  amlCounts <- sampleCounts[sampleCounts$disease == "pAML",]
+  bootstrap_resamples <- replicate(100000,bootstrap_resample(controlCounts=controlCounts,amlCounts=amlCounts))
+  #Make sure that the histogram looks normal
+  hist(bootstrap_resamples,breaks=25)
+
+  #Get the estimate and 95% confidence interval
+  print(quantile(bootstrap_resamples, c(.025, .5, .975)))
+}
+
+set.seed(1234)
+resamples_est <- processResamples(aml.est)
+resamples_cand <- processResamples(aml.cand)
+resamples_random <- processResamples(random)
+```
+
+The odds ratio based on bootstrap resampling for established AML genes is 6.9 (95% CI: (3.1, 14.9)).
+
+The odds ratio based on bootstrap resampling for candidate AML genes is 2.4 (95% CI: (1.7,3.2)).
+
+The odds ratio based on bootstrap resampling for randomly-selected genes is 1.6(95% CI: (1.1,2.3)).
+
+
+The confidence intervals are very similar using the binomial method as bootstrap resampling. 
+
+## Resampling-based inference of germline burden
+
+Now, we perform resampling to compare the percentage of subjects with a germline
+variant in each of these groups of genes.
+```{r, warning=FALSE, message=FALSE}
+set.seed(1234)
+library(reshape2)
+rs <- function(y, n, m, slop=20) {
+  s <- n + (round(slop/2)) - sample(seq_len(slop), 1)
+  replicate(m, sum(y[sample.int(n=length(y), size=s)] > 0) / s)
+}
+
+processData <- function(df){
+  bySample <- df %>% group_by(sampleNames,disease) %>% summarize(n=n())
+  sampleCounts <- left_join(samples,bySample)
+  sampleCounts$n[is.na(sampleCounts$n)] <- 0
+  
+  byGroup <- split(sampleCounts$n, sampleCounts$disease)
+  res <- data.frame(lapply(byGroup, rs, n=200, m=3000, slop=2)) 
+  results <- melt(res, variable.name="Group", value.name="Burden")
+}
+
+results_est <- processData(aml.est)
+results_cand <- processData(aml.cand)
+results_random <- processData(random)
+results_est$Region <- "Established Genes"
+results_cand$Region <- "Candidate Genes"
+results_random$Region <- "Randomly-selected Genes"
+res_combined <- rbind(results_est,results_cand,results_random)
+res_combined$Region <- factor(res_combined$Region,levels=c("Established Genes","Candidate Genes","Randomly-selected Genes"))
+
+res_combined$Group <- gsub("random","1KG (randoms)",res_combined$Group)
+library(ggbeeswarm)
+library(ggsignif)
+
+grp.colors <- c("1000 Genomes Subject"="gray","pAML"="#0CB702")
+ggplot(res_combined, aes(x=Group, y=Burden, color=Group)) + 
+  scale_y_continuous(labels = scales::percent)+
+  facet_wrap(~Region) +
+  ggtitle(paste("Predicted loss of function variant burden"))+
+  ylab("Germline burden") +
+  geom_quasirandom(size=1) + 
+  theme_classic() + 
+  theme(legend.position="none",plot.title = element_text(hjust = 0.5))+
+  theme(text = element_text(face="bold", size = 14))+
+  theme(plot.title=element_text(face="bold",size=20))+
+  scale_color_manual(values =grp.colors)
+
+```
+
+Pediatric AML patients have a higher frequency of loss of function
+variants in all of the gene categories, and this difference is most distinct
+in established predisposition genes and in candidate predisposition genes.
+
+## Testing the Fanconi Anemia pathway
+
+Here, we use burden testing to test for an enrichment of germline pLOF variants
+in the Fanconi Anemia (FA) pathway. The FA pathway performs DNA double-stranded 
+break repair and is frequently mutated in cancer. Many of these genes have been 
+implicated in cancer predisposition, most notably in breast cancer. Here, we examine
+only the FA genes that are known to confer increased breast cancer risk in the 
+autosomal dominant form to determine if they also have an increased burden in 
+pediatric AML patients.
+
+```{r, warning=FALSE, message=FALSE}
+
+fa_genes <- c("BRCA1","BRCA2","BRIP1","FANCB","PALB2","RAD50","RAD51","RAD51C","RAD51D")
+fa_variants <- aml[aml$SYMBOL %in% fa_genes,]
+
+bySample <- aml %>% group_by(sampleNames,disease) %>% summarize(n=n())
+sampleCounts <- left_join(samples,bySample)
+sampleCounts$n[is.na(sampleCounts$n)] <- 0
+fa_counts <- sampleCounts %>% dplyr::select(sampleNames,disease)
+fa_counts$fa_variant <- 0
+fa_counts$fa_variant[fa_counts$sampleNames %in% fa_variants$sampleNames] <- 1
+print(table(fa_counts$fa_variant,fa_counts$disease))
+print(table(fa_variants$SYMBOL,fa_variants$disease))
+
+#Chi-square test between pediatric AML and controls
+print(chisq.test(fa_counts$fa_variant,fa_counts$disease))
+
+#Calculate odds ratio
+fa_counts$disease <- as.factor(fa_counts$disease)
+fa.binom.fit <- glm(disease ~ fa_variant, data=fa_counts, family=binomial)
+library(questionr)
+print(odds.ratio(fa.binom.fit))
+
+```
+
+The odds ratio using the binomial distribution is 22.7 (95% CI: (5.2,155.5)), p=0.0001352, providing strong support
+that these FA genes should be considered as predisposing for pediatric AML.
+
+# Discussion
+The results of these burden tests strongly support the hypothesis that pediatric AML
+patients have a higher burden of deleterious loss of function variants, especially
+in genes with candidate or established roles in AML predisposition. 
+
+
+## Session information 
+
+```{r}
+sessionInfo()
+```

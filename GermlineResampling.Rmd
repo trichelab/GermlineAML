@@ -1,0 +1,122 @@
+---
+title: "Germline variant analysis via resampling"
+output: html_document
+date: "2025-03-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The following documentation shows the methodology for the meta-analysis of germline variants in 
+acute leukemia and myelodysplastic syndromes as described in Harmon, et. al, 2025:
+"Germline Variant Burden Warrants Universal Genetic Testing in Pediatric Myeloid Leukemia".
+
+The purpose of this analysis is to determine if there are significant differences
+in germline predisposition between acute lymphoblastic leukemia (ALL), acute myeloid leukemia (AML), 
+and myelodysplastic syndrome (MDS). To investigate this, we compared the percentage of 
+patients that have a pathogenic germline variant related to hematopoietic malignancy
+predisposition within published cohorts of patients.
+
+We collected and harmonized several large WGS/WES studies to investigate
+evidence for disparities in genetic variants between acute lymphoblastic leukemia,
+acute myeloid leukemia, and myelodysplastic syndrome. 
+Here, we focus on germline pathogenic/likely pathogenic (P/LP) variants
+with seemingly relevant consequences for blood and immune development based on
+the University of Chicago's genetic services panel for hereditary hematopoietic
+malignancy.
+
+This document shows the statistical methodology employed, including Poisson regression
+and resampling. 
+
+## Modeling germline burden with Poisson regression
+
+We used Poisson regression to model germline variants because Poisson models are 
+useful for modeling rare events. We used the robust Poisson test for trend, because
+it accounts for differences in dispersion between the groups. We tested for a 
+significance in trend (B-ALL < T-ALL < AML < MDS).
+
+```{r, warning=FALSE, message=FALSE}
+combined <- read.csv("pan_acute_leukemia_MDS_G_PLP.csv")
+combined$Source <- relevel(relevel(relevel(factor(combined$Source), 4), 4), 4)
+combined$Lineage <- relevel(relevel(factor(combined$Lineage), 3), 3)
+combined$Group <- paste(combined$AgeGroup, gsub("\\-", "", combined$Lineage))
+combined$Group <- relevel(relevel(factor(combined$Group), 4), 4)
+with(combined, table(Group))
+
+#Calculate actual percents and confidence intervalsof patients with a germline variant for each diagnosis
+nrow(combined[combined$Lineage=="AML" & combined$G_PLP != 0,]) / nrow(combined[combined$Lineage=="AML",])*100
+binom.test(nrow(combined[combined$Lineage=="AML" & combined$G_PLP != 0,]) , nrow(combined[combined$Lineage=="AML",]), conf.level = 0.95)
+
+nrow(combined[combined$Lineage=="T-ALL" & combined$G_PLP != 0,]) / nrow(combined[combined$Lineage=="T-ALL",])*100
+binom.test(nrow(combined[combined$Lineage=="T-ALL" & combined$G_PLP != 0,]), nrow(combined[combined$Lineage=="T-ALL",]), conf.level = 0.95)
+
+nrow(combined[combined$Lineage=="B-ALL" & combined$G_PLP != 0,]) / nrow(combined[combined$Lineage=="B-ALL",])*100
+binom.test(nrow(combined[combined$Lineage=="B-ALL" & combined$G_PLP != 0,]), nrow(combined[combined$Lineage=="B-ALL",]), conf.level = 0.95)
+
+nrow(combined[combined$Lineage=="MDS" & combined$G_PLP != 0,]) / nrow(combined[combined$Lineage=="MDS",]) * 100
+binom.test(nrow(combined[combined$Lineage=="MDS" & combined$G_PLP != 0,]), nrow(combined[combined$Lineage=="MDS",]), conf.level = 0.95)
+
+# relevel to compare against B-ALL (largest group and lowest mutation rate)
+combined$trend <- ordered(combined$Lineage)
+
+library(robust)
+fit_rob_trend <- glmRob(G_PLP ~ trend, 
+                        data=subset(combined, AgeGroup == "Pediatric"),
+                        family="poisson")
+summary(fit_rob_trend) 
+
+fit_rob_null <- glmRob(G_PLP ~ 1, 
+                       data=subset(combined, AgeGroup == "Pediatric"),
+                       family="poisson")
+anova(fit_rob_trend, fit_rob_null, test = "Chisq")
+
+```
+
+The robust Poisson model shows a p-value < 0.001. We can therefore reject the null
+hypothesis that there is no relationship between type of malignancy and frequency
+of germline variants. This supports the conclusion that the frequency of germline 
+variants in AML is higher than that of B-ALL and T-ALL, and lower than that of MDS.
+
+## Resampling-based inference of germline burden
+
+We also approached this using an orthogonal brute-force non-parametric 
+approach, which is to resample over and over without replacement. The advantage 
+of this approach is that resampling makes no assumptions about the underlying 
+distribution of the data. 
+
+This tests the hypothesis that the percentage of subjects with at least one
+germline variant is different between ALL, AML, and MDS.
+
+```{r, warning=FALSE, message=FALSE}
+combined <- read.csv("pan_acute_leukemia_MDS_G_PLP.csv")
+combined$Group <- paste(combined$AgeGroup, gsub("\\-", "", combined$Lineage))
+table(combined$Group)
+#Not enough adult ALL to resample
+combined <- combined[!combined$Group %in% c("Adult TALL","Adult BALL"),]
+combined$Group <- factor(combined$Group, levels=c("Pediatric BALL","Pediatric TALL","Pediatric AML","Adult AML","Pediatric MDS","Adult MDS"))
+byGroup <- split(combined$G_PLP, combined$Group)
+
+rs <- function(y, n, m) replicate(m, sum(y[sample.int(n=length(y),size=n)]>0)/n)
+
+library(reshape2)
+results <- melt(data.frame(lapply(byGroup, rs, n=200, m=4000)), 
+                variable.name="Group", value.name="Burden")
+
+library(ggplot2)
+library(ggbeeswarm)
+ggplot(results, aes(x=Group, y=Burden, color=Group)) + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.2),
+                     breaks = seq(0, .2, .025)) + ylab("Germline burden") +
+  geom_hline(yintercept=0.05, lty=3) + geom_quasirandom(size=0.3) + 
+  theme_classic() + theme(legend.position="none") +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  theme(text=element_text(face="bold",size = 16)) 
+
+```
+
+## Session information 
+
+```{r}
+sessionInfo()
+```
