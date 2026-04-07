@@ -1,0 +1,757 @@
+---
+title: "Burden Testing for Germline Variants in Pediatric Leukemias"
+output: html_document
+date: "2026-04-02"
+---
+
+```{r setup, include=FALSE}
+# Set global chunk options (show code in output)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Description
+The following documentation shows the methodology for burden testing of germline variants in de novo pediatric acute myeloid leukemia (AML), Down syndrome AML, Down syndrome transient abnormal myelopoiesis (TAM), and pediatric T acute lymphoblastic leukemia (T-ALL) as compared to healthy controls from the 1000 Genomes Project and Human Genome Diversity Project (1KG + HGDP), as described in Harmon, et. al, 2025: "Germline Variant Burden Warrants Universal Genetic Testing in Pediatric Myeloid Leukemia".
+
+# Background: Burden Testing for Germline Predisposition Variants
+We performed burden testing to evaluate the contribution of inherited germline variants to disease risk by comparing the frequency of deleterious variants in patients versus the general population. Unlike analyses of individual variants, burden testing aggregates variants across genes or gene sets, increasing statistical power to detect associations, particularly for rare variants.
+
+In this study, we applied burden testing to assess whether individuals with AML,Down syndrome AML/TAM, and T-ALL harbor a greater number of putative deleterious variants in candidate predisposition genes. We hypothesized that leukemia patients would carry a higher burden of such variants compared to population controls. Control data were derived from the 1000 Genomes Project and the Human Genome Diversity Project, with adjustments made for ancestry and sequencing depth to mitigate potential confounding.
+
+We evaluated both curated AML predisposition genes and randomly selected gene sets as comparators. Variants were defined as rare (gnomAD maximum allele frequency < 0.001) and putatively deleterious based on one or more of the following criteria: predicted loss-of-function (stop-gain or frameshift variants, excluding those in the final exon of multi-exon genes), REVEL score ≥ 0.8, or classification as pathogenic/likely pathogenic in ClinVar, with no conflicting benign/likely benign annotation. Variant annotation was performed using Ensembl’s Variant Effect Predictor.
+
+
+Load the data.
+```{r, warning=FALSE, message=FALSE}
+# Load required libraries
+library(tidyverse)
+
+# Load candidate gene list and random gene list
+cand_genes <- read_csv("original_gene_names.csv")$Gene
+random_genes <- read_csv("random_gene_names.csv")$Gene
+
+# Load predicted deleterious variant dataset
+vars <- read_csv("predicted_deleterious_variants.csv")
+
+# Set cohort ordering for consistent plotting/analysis
+vars$Cohort <- factor(vars$Cohort,levels=c("HGDP + 1KG","T-ALL","TAM","DS-AML","De novo AML"))
+```
+
+
+Dynamically filter germline variants based on variant allele frequency (VAF). We use binomial probability to ensure that the false negative rate is at ~1% regardless of the depth of the variant. This helps to balance cohorts with differing levels of sequencing depth so that they will have similar overall variant yields.
+```{r, warning=FALSE, message=FALSE}
+# Function to determine minimum alternate allele depth cutoff
+# based on sequencing depth and a target false negative rate
+alt_depth_cutoff_for_depth <- function(depth,true_vaf = 0.5,target_fnr = 0.01) {
+  # Iterate through possible allele count thresholds
+  cutoff_k <- 0
+  for (k in 0:depth) {
+    # Compute binomial probability of missing variant (false negative rate)
+    fnr <- pbinom(k - 1, size = depth, prob = true_vaf)
+    if (fnr <= target_fnr) {
+      cutoff_k <- k
+    } else {
+      break
+    }
+  }
+  # Return minimum alternate allele depth threshold
+  return(cutoff_k)
+}
+
+# Apply function across all variants
+vars$cutoff_ad <- mapply(
+  alt_depth_cutoff_for_depth,
+  depth = vars$totalDepth
+)
+
+# Filter variants passing allele depth threshold
+vars.fn.f <- subset(vars,altDepth >= cutoff_ad)
+
+# Subset to candidate genes and random genes
+vars.cand <- vars.fn.f %>% filter(SYMBOL %in% cand_genes)
+vars.random <- vars.fn.f %>% filter(SYMBOL %in% random_genes)
+```
+
+# Gene Stratification
+Genes are stratified into biologically meaningful categories:
+ - Established (Autosomal Dominant - AD/Autosomal Recessive - AR): Known predisposition genes for pediatric AML
+ - Candidate: Hypothesized but not fully validated in pediatric AML
+ - Random: Randomly-selected genes
+ This allows assessment of specificity of signal.
+```{r, warning=FALSE, message=FALSE}
+# Load curated gene classification table
+established.genes <- read_csv("established_myeloid_genes.csv")
+
+# Subset autosomal dominant genes (excluding gain-of-function)
+est.ad <- established.genes[grepl("AD",established.genes$Inheritance),]
+est.ad <- est.ad[!grepl("GOF",est.ad$Inheritance),]
+
+# Subset autosomal recessive genes
+est.ar <- established.genes[established.genes$Inheritance=="AR",]
+
+# Extract gene lists
+est.ad.genes <- unique(est.ad$Gene)
+est.ar.genes <- unique(est.ar$Gene)
+non.est.cand.genes <- setdiff(cand_genes,union(est.ad$Gene,est.ar$Gene))
+
+# Subset variants by gene class
+vars.est <- vars.cand[vars.cand$SYMBOL %in% established.genes$Gene,]
+vars.est.ad <- vars.est[vars.est$SYMBOL %in% est.ad$Gene,]
+vars.est.ar <- vars.cand[vars.cand$SYMBOL %in% est.ar$Gene,]
+vars.candidate <- vars.cand[!vars.cand$SYMBOL %in% established.genes$Gene,]
+```
+
+We can additionally categorize genes based on constraint, since genes that are haploinsufficient are less likely to have deleterious variation. Here we use the Loss of Function Observed/Estimated Upper Fraction score (LOEUF) from GnomAD. The input file here is a subsetted file of constraint metrics for selected genes, originally downloaded from GnomAD as gnomad.v4.1.constraint_metrics.tsv.
+```{r, warning=FALSE, message=FALSE, fig.width=8, fig.height=6}
+# Load LOEUF constraint data
+constraint.df <- read_csv("gnomad_constraint_selected_genes.csv")
+
+# Set plotting order for gene categories
+constraint.df$Category <- factor(constraint.df$Category,
+                                 levels=c("Established (AD)","Established (AR)",
+                                          "Candidate","Random"))
+
+# Plot LOEUF distributions
+library(ggbeeswarm)
+ggplot(constraint.df, aes(x=Category,y=lof.oe_ci.upper))+
+  geom_boxplot()+
+  geom_beeswarm(alpha=0.5)+
+  theme_classic()+
+  ylab("LOEUF score")+
+  ggtitle("GnomAD Loss-Of-function Observed/Expected Upper Fraction (LOEUF)\nfor Selected Genes")+
+  theme(legend.position="none",plot.title = element_text(hjust = 0.5))
+
+# Define candidate median constraint threshold
+median_cand_oe <- median(constraint.df$lof.oe_ci.upper[constraint.df$Category=="Candidate"])
+
+# Label genes as low/high constraint
+constraint.df$LowOrHigh <- ifelse(constraint.df$lof.oe_ci.upper < median_cand_oe, "Low","High")
+
+table(constraint.df$Category,constraint.df$LowOrHigh)
+```
+As expected, established (AD) genes have lower LOEUF scores, indicating higher constraint. Established (AR) genes have higher LOEUF scores, which is as expected for genes that are not disease-causing in the heterozygous form. This plot also indicates that candidate predisposition genes have lower LOEUF scores, or are overall more constrained, than randomly-selected genes. We can therefore stratify by LOEUF for a more even comparison.
+
+Separate into constrained (Low LOEUF) and unconstrained (High LOEUF) genes. We use the 0.6 threshold recommended by GnomAD as the cutoff between constrained and unconstrained.
+```{r, warning=FALSE, message=FALSE, fig.width=8, fig.height=6}
+# Binary classification using LOEUF threshold
+constraint.df$constraint_group <- ifelse(constraint.df$lof.oe_ci.upper < 0.6,"Constrained","Unconstrained")
+
+# Visualize constraint grouping
+ggplot(constraint.df, aes(x=Category,y=lof.oe_ci.upper))+
+  geom_boxplot()+
+  geom_beeswarm(aes(color=constraint_group),alpha=0.5)+
+  theme_classic()+
+  ylab("LOEUF")+
+  ggtitle("GnomAD Loss-of-function Constraint for Selected Genes")
+
+# Subset variants by constraint category
+vars.cand.low.oe <- vars.candidate %>% filter(SYMBOL %in% constraint.df$gene[constraint.df$constraint_group == "Constrained"])
+vars.cand.high.oe <- vars.candidate %>% filter(SYMBOL %in% constraint.df$gene[constraint.df$constraint_group == "Unconstrained"])
+vars.random.low.oe <- vars.random %>% filter(SYMBOL %in% constraint.df$gene[constraint.df$constraint_group == "Constrained"])
+vars.random.high.oe <- vars.random %>% filter(SYMBOL %in% constraint.df$gene[constraint.df$constraint_group == "Unconstrained"])
+```
+
+# Resampling-based inference of rate ratios of deleterious variants
+Now we compute rate ratios of deleterious variants as the mean number of deleterious variants in a case cohort as compared to the control cohort. We use a nonparametric approach using resampling to match the cases to an ancestrally-similar control. Resampling also has the benefit of not having assumptions about the underlying distribution of the data. Here, we resample with replacement each of the cohorts, compute rate ratios (RR), and repeat 1000 times. Rate ratios represent relative enrichment of deleterious variants in cases vs controls. RR > 1 suggests increased burden in cases.
+```{r, warning=FALSE, message=FALSE}
+# Load ancestry covariates for matching
+with_ancestry <- read.csv("ancestry_covariates.csv")
+
+# Ensure consistent cohort ordering
+with_ancestry$Cohort <- factor(with_ancestry$Cohort,levels=c("HGDP + 1KG","T-ALL","De novo AML","DS-AML","TAM"))
+
+# Split ancestry covariates by cohort
+byCohort <- with(with_ancestry, split(setNames(eaf.max, with_ancestry$USI), Cohort))
+
+# Load matching/balancing function
+source('balance.R')
+
+# Function to generate one bootstrap resample and compute rate ratios
+bootstrap_resample <- function(byCohortCounts,byCohort) {
+  # Match controls to cases by ancestry
+  balancedControls <- lapply(byCohort[-1], balance, x=byCohort[[1]], exact=TRUE)
+
+  # Subset matched control samples
+  balancedControlCounts <- lapply(names(balancedControls), function(x) {
+    rownames(byCohortCounts$`HGDP + 1KG`) <- byCohortCounts$`HGDP + 1KG`$USI
+    byCohortCounts$`HGDP + 1KG`[balancedControls[[x]],]
+  })
+  names(balancedControlCounts) <- names(balancedControls)
+
+  # Resample cases with replacement
+  sizes <- lapply(byCohortCounts,nrow)
+  byCohortResamples <- lapply(names(byCohortCounts[-1]), function(x) {
+    byCohortCounts[[x]][sample(seq(1:sizes[[x]]), size = sizes[[x]], replace = TRUE),]
+  })
+  names(byCohortResamples) <- names(byCohortCounts[-1])
+
+  # Compute rate ratios (case vs control burden)
+  RRs <- lapply(names(byCohortResamples),function(x){
+    case_mean = mean(byCohortResamples[[x]]$n)
+    control_mean = mean(balancedControlCounts[[x]]$n)
+    return((case_mean) / (control_mean))
+  })
+
+  names(RRs) <- names(byCohortResamples)
+  return(RRs)
+}
+
+# Wrapper function to run bootstrap repeatedly
+processResamples <- function(df){
+  # Count variants per sample
+  bySample <- df %>% group_by(USI,Cohort) %>% summarize(n=n())
+
+  # Merge with ancestry info
+  sampleCounts <- left_join(with_ancestry,bySample)
+  sampleCounts$n[is.na(sampleCounts$n)] <- 0
+
+  # Split by cohort
+  byCohortCounts <- split(sampleCounts,sampleCounts$Cohort)
+
+  # Run bootstrap (1000 iterations)
+  bootstrap_resamples <- replicate(1000,bootstrap_resample(byCohortCounts,byCohort))
+
+  # Convert to matrix for downstream use
+  bootstrap_resamples.mat <- as.matrix(bootstrap_resamples)
+  return(bootstrap_resamples.mat)
+}
+
+# Run bootstrap analyses for each gene category
+set.seed(1234)
+resamples_est <- processResamples(vars.est.ad)
+resamples_est_ar <- processResamples(vars.est.ar)
+resamples_cand_low <- processResamples(vars.cand.low.oe)
+resamples_cand_high <- processResamples(vars.cand.high.oe)
+resamples_random_low <- processResamples(vars.random.low.oe)
+resamples_random_high <- processResamples(vars.random.high.oe)
+
+# Combine bootstrap results into one dataframe
+resamples.df <- data.frame("Established (AD) Genes" = unlist(c(resamples_est[1,],resamples_est[2,],resamples_est[3,],resamples_est[4,])),
+                           "Established (AR) Genes" = unlist(c(resamples_est_ar[1,],resamples_est_ar[2,],resamples_est_ar[3,],resamples_est_ar[4,])),
+                           "Candidate (Low LOEUF) Genes" = unlist(c(resamples_cand_low[1,],resamples_cand_low[2,],resamples_cand_low[3,],resamples_cand_low[4,])),
+                           "Candidate (High LOEUF) Genes" = unlist(c(resamples_cand_high[1,],resamples_cand_high[2,],resamples_cand_high[3,],resamples_cand_high[4,])),
+                           "Random (Low LOEUF) Genes"= unlist(c(resamples_random_low[1,],resamples_random_low[2,],resamples_random_low[3,],resamples_random_low[4,])),
+                           "Random (High LOEUF) Genes"= unlist(c(resamples_random_high[1,],resamples_random_high[2,],resamples_random_high[3,],resamples_random_high[4,])),
+                          "Cohort"=c(rep("T-ALL",1000),rep("De novo AML",1000),rep("DS-AML",1000),rep("TAM",1000)))
+
+# Convert to tidy format for plotting
+resamples.df.tidy <- resamples.df %>% gather(key="Region",value="RR",-Cohort,factor_key=TRUE)
+
+# Clean up region labels
+resamples.df.tidy$Region <- gsub("\\.", " ",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Established..AD..Genes", "Established (AD) Genes",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Established..AR..Genes", "Established (AR) Genes",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Candidate  High LOEUF  Genes", "Candidate (High LOEUF) Genes",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Candidate  Low LOEUF  Genes", "Candidate (Low LOEUF) Genes",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Random  Low LOEUF  Genes", "Random (Low LOEUF) Genes",resamples.df.tidy$Region) 
+resamples.df.tidy$Region <- gsub("Random  High LOEUF  Genes", "Random (High LOEUF) Genes",resamples.df.tidy$Region) 
+
+# Set factor order
+resamples.df.tidy$Region <- factor(resamples.df.tidy$Region,levels = c("Established (AD) Genes","Established (AR) Genes","Candidate (Low LOEUF) Genes","Candidate (High LOEUF) Genes","Random (Low LOEUF) Genes","Random (High LOEUF) Genes"))
+
+# Remove invalid RR values
+resamples.df.tidy <- resamples.df.tidy %>% filter(!is.na(RR), is.finite(RR), RR > 0)
+
+# Set cohort order
+resamples.df.tidy$Cohort <- factor(resamples.df.tidy$Cohort,levels=c("HGDP + 1KG","T-ALL","TAM","DS-AML","De novo AML"))
+```
+
+Make a forest plot to visualize rate ratios and confidence intervals for each case cohort compared to controls. Confidence intervals were derived from the empirical percentiles of this distribution (90% CI: 5th–95th percentiles; 95% CI: 2.5th–97.5th percentiles; 99% CI: 0.5th–99.5th percentiles), and one-sided empirical p-values were calculated as the proportion of resamples with RR ≥ 1.
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+# Define gene subsets for labeling
+random.low <- constraint.df %>% filter(Category=="Random", constraint_group=="Constrained")
+random.high <- constraint.df %>% filter(Category=="Random", constraint_group=="Unconstrained")
+candidate.low <- constraint.df %>% filter(Category=="Candidate", constraint_group=="Constrained")
+candidate.high <- constraint.df %>% filter(Category=="Candidate", constraint_group=="Unconstrained")
+
+# Annotate each variant with region category
+vars.fn.f$Region <- ifelse(vars.fn.f$SYMBOL %in% est.ad$Gene, "Established (AD)\nGenes",
+                        ifelse(vars.fn.f$SYMBOL %in% est.ar$Gene, "Established (AR)\nGenes",
+                               ifelse(vars.fn.f$SYMBOL %in% candidate.low$gene, "Candidate (Low LOEUF)\nGenes",
+                                      ifelse(vars.fn.f$SYMBOL %in% candidate.high$gene, "Candidate (High LOEUF)\nGenes",
+                                             ifelse(vars.fn.f$SYMBOL %in% random.low$gene,"Random (Low LOEUF)\nGenes",
+                                                    ifelse(vars.fn.f$SYMBOL %in% random.high$gene,"Random (High LOEUF)\nGenes","other"))))))
+
+# Remove variants not assigned to a region
+vars.anno <- vars.fn.f %>% filter(Region != "other")
+
+# Count number of individuals with ≥1 variant per region
+var.counts <- vars.anno %>%
+  distinct(USI, Cohort, Region) %>%
+  group_by(Cohort, Region) %>%
+  summarise(
+    n_var = n(),
+    .groups = "drop"
+  )%>%
+  complete(Cohort, Region, fill = list(n_var = 0))
+
+# Compute total individuals per cohort
+cohort.totals <- with_ancestry %>%
+  mutate("Cohort" = Cohort) %>% 
+  distinct(USI, Cohort) %>%
+  group_by(Cohort) %>%
+  summarise(
+    n_total = n(),
+    .groups = "drop"
+  )
+
+# Calculate proportion of individuals with variants
+var.counts <- var.counts %>%
+  left_join(cohort.totals, by="Cohort") %>%
+  mutate(
+    prop = n_var / n_total
+  )
+
+levels(resamples.df.tidy$Region) <- gsub(" Genes$", "\nGenes", levels(resamples.df.tidy$Region))
+
+#Calculate rate ratio confidence intervals based on percentiles of the resampled distribution.
+rr.df <- resamples.df.tidy %>%
+  group_by(Cohort, Region) %>%
+  summarise(
+    RR_median = median(RR, na.rm = TRUE),
+    RR_99lo = quantile(RR, 0.005, na.rm = TRUE),
+    RR_95lo = quantile(RR, 0.025, na.rm = TRUE),
+    RR_90lo = quantile(RR, 0.05, na.rm = TRUE),
+    RR_90hi = quantile(RR, 0.95, na.rm = TRUE),
+    RR_95hi = quantile(RR, 0.975, na.rm = TRUE),
+    RR_99hi = quantile(RR, 0.995, na.rm = TRUE),
+    
+    # one-sided empirical p-value (H1: RR > 1)
+    p_one_sided = (sum(RR <= 1, na.rm = TRUE) + 1) /
+                  (sum(!is.na(RR)) + 1),
+    .groups = "drop"
+  ) %>%
+  complete(
+    Cohort,
+    Region,
+    fill = list(
+      RR_median = NA,
+      RR_99lo = NA,
+      RR_95lo = NA,
+      RR_90lo = NA,
+      RR_90hi = NA,
+      RR_95hi = NA,
+      RR_99hi = NA,
+      p_one_sided = NA
+    )
+  )
+
+plot.df <- rr.df %>%
+  left_join(var.counts, by=c("Cohort","Region")) 
+
+plot.df$Region <- factor(plot.df$Region, levels = c("Established (AD)\nGenes","Established (AR)\nGenes",
+                                                   "Candidate (Low LOEUF)\nGenes","Random (Low LOEUF)\nGenes",
+                                                   "Candidate (High LOEUF)\nGenes",
+                                                    "Random (High LOEUF)\nGenes"))
+plot.df$Region <- factor(plot.df$Region, levels = rev(levels(plot.df$Region)))
+
+plot.df <- plot.df %>%
+  arrange(Region, Cohort)
+
+plot.df <- plot.df %>%
+  mutate(row = row_number())
+
+region_lines_forest <- plot.df %>%
+  group_by(Region) %>%
+  summarise(y = max(row) + 0.5, .groups = "drop")
+
+plot.df <- plot.df %>% filter(!Cohort=="1KG + HGDP")
+plot.df$Cohort <- reorder(plot.df$Cohort, plot.df$RR_median,na.rm=TRUE)
+pd <- position_dodge(width = 0.6)
+grp.colors <- c("De novo AML"="#458EF7","T-ALL"="#F09235", "DS-AML"="#7F170E","TAM"="#59069d")
+# add whiskers for 99%, 95%, 90% CIs and use log10 scale
+ggplot(plot.df, aes(x=RR_median, y=Region, color=Cohort)) +
+  geom_vline(xintercept=1, linetype="dotted", color="gray25") + 
+  geom_point(position=position_dodge(width=0.6), alpha=I(1), size=I(3)) +
+  geom_errorbar(orientation="y", width=0.2, alpha=I(0.25),
+                aes(xmin=RR_99lo, xmax=RR_99hi), linewidth=0.9,
+                position=position_dodge(width=0.6)) +
+  geom_errorbar(orientation="y", width=0.3, alpha=I(0.50),
+                aes(xmin=RR_95lo, xmax=RR_95hi), linewidth=0.9,
+                position=position_dodge(width=0.6)) +
+  geom_errorbar(orientation="y", width=0.4, alpha=I(0.75),
+                aes(xmin=RR_90lo, xmax=RR_90hi), linewidth=0.9,
+                position=position_dodge(width=0.6)) +
+
+  xlim(0.05, 20.0) + xlab("Rate ratios of deleterious variants (cases:controls)") + 
+  theme_classic() +
+  ylab("Gene category") + 
+  scale_x_log10(breaks = c(0.1, 1/3, 1, 3, 10),
+                labels = c("1:10", "1:3", "1:1", "3:1", "10:1")) + 
+  scale_color_manual(
+    values = grp.colors,
+    guide = guide_legend(reverse = TRUE)
+  ) +
+  ggtitle("Rate ratios of a deleterious variant\nwith 90%, 95%, and 99% intervals")+
+  theme(plot.title=element_text(face="bold",size=16))+
+  theme(text = element_text(face="bold", size = 14))
+
+```
+
+Make a table plot of the frequencies of deleterious variants, rate ratios, confidence intervals, and one-sided p-values.
+```{r, warning=FALSE, message=FALSE, fig.width=12, fig.height=6}
+table.df <- plot.df
+
+# Set ordering of regions for display (controls grouping in final table/plot)
+table.df$Region <- factor(table.df$Region,levels= c("Established (AD)\nGenes","Established (AR)\nGenes",
+                                                   "Candidate (Low LOEUF)\nGenes","Random (Low LOEUF)\nGenes",
+                                                   "Candidate (High LOEUF)\nGenes",
+                                                    "Random (High LOEUF)\nGenes"))
+
+# Set ordering of cohorts (controls row order in output)
+table.df$Cohort <- factor(table.df$Cohort,levels=c("De novo AML","DS-AML","TAM","T-ALL","Familial Lymphoid","HGDP + 1KG"))
+
+# Sort data by region and cohort for clean display
+table.df <- table.df %>%
+  arrange(Region, Cohort) 
+
+# Improve formatting of region labels by adding line breaks before LOEUF text
+levels(table.df$Region) <- gsub(" \\(Low", "\n(Low", levels(table.df$Region))
+levels(table.df$Region) <- gsub(" \\(High", "\n(High", levels(table.df$Region))
+
+# Create formatted labels for table display
+table.df <- table.df %>%
+  mutate(
+    # Counts formatted as n/N
+    count_label = paste0(n_var, "/", n_total),
+    
+    # Proportion formatted as percentage
+    prop_label = paste0(sprintf("%.1f", prop*100), "%   "),
+    
+    # Combined identifier (not directly plotted but useful for grouping/debugging)
+    cohort_region = paste(Cohort, Region, sep=" - "),
+    
+    # Only show region label once per group (avoid repetition in table)
+    Region_label = ifelse(duplicated(Region), "", as.character(Region)),
+    
+    # Format odds ratio (rate ratio) values
+    RR_label = sprintf("%.2f", RR_median),
+    
+    # Format confidence interval
+    CI_label = sprintf("(%.2f–%.2f)", RR_95lo, RR_95hi),
+    
+    # Format p-values (threshold at <0.001)
+    p_label = ifelse(p_one_sided < 0.001, "<0.001",
+                     sprintf("%.3f", p_one_sided))
+  )
+
+# Assign row index for plotting (controls vertical positioning)
+table.df <- table.df %>%
+  mutate(row = row_number())
+
+# Compute vertical center of each region block (for placing region labels)
+region_centers <- table.df %>%
+  group_by(Region) %>%
+  summarise(
+    row = mean(row),
+    Region_label = first(Region),
+    .groups = "drop"
+  )
+
+# Compute horizontal divider lines between regions
+region_lines <- table.df %>%
+  group_by(Region) %>%
+  summarise(y = max(row) + 0.5, .groups = "drop")
+
+# Replace NA values in formatted labels with "-" for cleaner display
+table.df$CI_label[grepl("NA",table.df$CI_label)] <- "-"
+table.df$RR_label[grepl("NA",table.df$RR_label)] <- "-"
+table.df$p_label[grepl("NA",table.df$p_label) | is.na(table.df$p_label)] <- "-"
+
+ggplot(table.df, aes(y = row, group = Cohort)) +
+  geom_text(aes(x = 1, label = Cohort), hjust = 0) +
+  geom_text(aes(x = 2.2, label = count_label), hjust = 0) +
+  geom_text(aes(x = 3, label = prop_label), hjust = 0) +
+  geom_text(aes(x = 3.7, label = RR_label), hjust = 0) +
+  geom_text(aes(x = 4.2, label = CI_label), hjust = 0) +
+  geom_text(aes(x = 5, label = p_label), hjust = 0) +
+  geom_text(
+    data = region_centers,
+    aes(x = 0, y = row, label = Region_label),
+    group = NA,
+    hjust = 0,
+    fontface = "bold"
+  ) +
+  geom_text(
+    data = data.frame(
+      x = c(0,1,2.2,3,3.7,4.2,5),
+      y = min(table.df$row) - 1,
+      label = c("Region","Cohort","n/N","%","RR","95% CI","p-val")
+    ),
+    aes(x = x, y = y, label = label),
+    fontface = "bold",
+    group = NA,
+    hjust = 0
+  ) +
+  geom_hline(
+  yintercept = min(table.df$row) - 0.5,
+  color = "grey50",
+  linewidth = 0.6
+) +
+  geom_hline(
+    data = region_lines,
+    aes(yintercept = y),
+    color = "grey85",
+    linewidth = 0.5
+  ) +
+  scale_x_continuous(
+    limits = c(0, 5.5)
+  ) +
+  scale_y_reverse() +
+  theme_void() +
+  ggtitle("Patients with rare variants with predicted deleterious impact") +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+This indicates that de novo AML and T-ALL show an increased amount in deleterious rare variants ans compared to control subjects. We also note that the Down syndrome AML and TAM cohorts show lower amounts of deleterious variants than de novo AML and T-ALL, and are not significantly different from controls in any gene category.
+
+# Resampling-based inference of germline burden
+
+To evaluate the proportion of individuals carrying ≥1 deleterious rare variant, we apply the same resampling framework. For each iteration, the proportion of individuals with ≥1 qualifying variant is computed within each cohort to generate a resampled distribution of proportions. Differences between cohorts are summarized as Δ, the median difference in carrier proportions between cases and controls across resamples. Confidence intervals are derived from the 2.5th–97.5th percentiles of the resampled differences, and p-values are calculated as the proportion of resamples consistent with the null hypothesis. 
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=6}
+
+resample <- function(xCounts, controlCounts, xAncestry, controlAncestry, slop=20) {
+  
+  balancedControls <- balance(controlAncestry, xAncestry, exact=TRUE) 
+  rownames(controlCounts) <- controlCounts$USI
+  balancedControlCounts <- controlCounts[balancedControls,]
+  
+  n <- nrow(xCounts)
+  s <- n + (round(slop/2)) - sample(seq_len(slop), 1)
+  
+  # Proportions (>=1 variant)
+  p_case <- sum(xCounts$n[sample.int(length(xCounts$n), size=s, replace=TRUE)] > 0) / s
+  
+  p_control <- sum(balancedControlCounts$n[sample.int(length(balancedControlCounts$n), size=s, replace=TRUE)] > 0) / s
+  
+  # Paired statistics
+  diff <- p_case - p_control
+  PR <- ifelse(p_control == 0, NA, p_case / p_control)
+  
+  return(c(p_case = p_case,
+           p_control = p_control,
+           diff = diff,
+           PR = PR))
+}
+
+processData <- function(df, Cohort){
+  
+  bySample <- df %>% group_by(USI, Cohort) %>% summarize(n=n())
+  sampleCounts <- left_join(with_ancestry, bySample)
+  sampleCounts$n[is.na(sampleCounts$n)] <- 0
+  
+  byCohortCounts <- split(sampleCounts, sampleCounts$Cohort) 
+  
+  res <- replicate(
+    1000,
+    resample(
+      byCohortCounts[[Cohort]],
+      byCohortCounts[["HGDP + 1KG"]],
+      byCohort[[Cohort]],
+      byCohort[["HGDP + 1KG"]]
+    )
+  )
+  
+  res <- t(res)
+  res.df <- as.data.frame(res)
+  
+  ## ---- Inference ----
+  
+  # Difference in proportions
+  diff_vals <- res.df$diff
+  
+  diff_ci <- quantile(diff_vals, probs = c(0.025, 0.5, 0.975), na.rm=TRUE)
+  diff_p <- mean(diff_vals <= 0, na.rm=TRUE)  # one-sided: cases > controls
+  
+  # Proportion ratio
+  PR_vals <- res.df$PR
+  
+  PR_ci <- quantile(PR_vals, probs = c(0.025, 0.5, 0.975), na.rm=TRUE)
+  PR_p <- mean(PR_vals <= 1, na.rm=TRUE)
+  
+  ## ---- Output ----
+  
+  summary <- list(
+    diff_ci = diff_ci,
+    diff_p = diff_p,
+    PR_ci = PR_ci,
+    PR_p = PR_p,
+    resamples = res.df
+  )
+  
+  return(summary)
+}
+makeFig <- function(Cohort){
+  
+  # Helper to extract plotting df
+  extract_df <- function(res, Cohort){
+    df <- res$resamples
+    
+    data.frame(
+      Group = c(rep(Cohort, nrow(df)), rep("HGDP + 1KG", nrow(df))),
+      Burden = c(df$p_case, df$p_control)
+    )
+  }
+  
+  # Helper to extract stats
+ extract_stats <- function(res, region){
+  data.frame(
+    Region = region,
+    diff = 100 * res$diff_ci[2],   # median
+    lower = 100 * res$diff_ci[1],
+    upper = 100 * res$diff_ci[3],
+    p = res$diff_p
+  )
+}
+  
+  # Run analyses
+  results_est <- processData(vars.est.ad, Cohort)
+  results_est_ar <- processData(vars.est.ar, Cohort)
+  results_cand_low <- processData(vars.cand.low.oe,Cohort)
+  results_random_low <- processData(vars.random.low.oe,Cohort)
+  results_cand_high <- processData(vars.cand.high.oe,Cohort)
+  results_random_high <- processData(vars.random.high.oe,Cohort)
+
+  # Extract plotting data
+  df_est <- extract_df(results_est, Cohort)
+  df_est_ar <- extract_df(results_est_ar, Cohort)
+  df_cand_low <- extract_df(results_cand_low, Cohort)
+  df_random_low <- extract_df(results_random_low, Cohort)
+  df_cand_high <- extract_df(results_cand_high, Cohort)
+  df_random_high <- extract_df(results_random_high, Cohort)
+  
+  # Add region labels
+  df_est$Region <- "Established (AD)"
+  df_est_ar$Region <- "Established (AR)"
+  df_cand_low$Region <- "Candidate\n(Low LOEUF)"
+  df_random_low$Region <- "Random\n(Low LOEUF)"
+  df_cand_high$Region <- "Candidate\n(High LOEUF)"
+  df_random_high$Region <- "Random\n(High LOEUF)"
+  
+  # Combine plotting data
+  res_combined <- rbind(df_est, df_est_ar, df_cand_low, df_random_low, df_cand_high, df_random_high)
+  
+  # Stats table
+  stats_df <- rbind(
+    extract_stats(results_est, "Established (AD)"),
+    extract_stats(results_est_ar, "Established (AR)"),
+    extract_stats(results_cand_low, "Candidate\n(Low LOEUF)"),
+    extract_stats(results_random_low, "Random\n(Low LOEUF)"),
+      extract_stats(results_cand_high, "Candidate\n(High LOEUF)"),
+    extract_stats(results_random_high, "Random\n(High LOEUF)")
+  )
+  
+  # Format annotation text
+stats_df$p_label <- ifelse(
+  stats_df$p < 0.001,
+  "p < 0.001",
+  sprintf("p = %.3f", stats_df$p)
+)
+
+  # Convert p-values to significance stars
+  stats_df$star <- cut(
+    stats_df$p,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    labels = c("***", "**", "*", "ns")  # ns = not significant
+  )
+  
+  # Format the label with Δ% and 95% CI
+  stats_df$label <- sprintf(
+    "Δ = %.1f%% (%.1f-%.1f)\n%s",
+    stats_df$diff,    # median difference in resampled proportions * 100
+    stats_df$lower,   # lower CI * 100
+    stats_df$upper,   # upper CI * 100
+    stats_df$star    # significance stars
+  )
+  
+  # Position labels (top of each facet)
+  stats_df$y <- 0.33
+  stats_df$x <- 1.5
+  
+  # Factor levels
+  res_combined$Region <- factor(
+    res_combined$Region,
+    levels = c(
+      "Established (AD)",
+      "Established (AR)",
+      "Candidate\n(Low LOEUF)",
+      "Random\n(Low LOEUF)",
+      "Candidate\n(High LOEUF)",
+      "Random\n(High LOEUF)"
+    )
+  )
+  
+  stats_df$Region <- factor(
+  stats_df$Region,
+  levels = levels(res_combined$Region)
+)
+  
+  library(ggbeeswarm)
+  
+  res_combined$Group <- factor(res_combined$Group, levels=c("HGDP + 1KG", Cohort))
+  grp.colors <- c("HGDP + 1KG"="gray","De novo AML"="#458EF7","T-ALL"="#F09235", "DS-AML"="#7F170E","TAM"="#59069d")
+  g <- ggplot(res_combined, aes(x=Group, y=Burden, color=Group)) + 
+    scale_y_continuous(
+      labels = scales::percent,
+      limits = c(0, 0.33),
+      breaks = seq(0, 0.33, by = 0.05)
+    ) +
+    facet_wrap(~Region, ncol=6) +
+    ggtitle("Predicted deleterious rare variant burden in ancestry-balanced cohorts") +
+    ylab("Carrier frequency (≥1 variant)") +
+    xlab("")+
+    geom_quasirandom(size=0.5, alpha=0.7) + 
+    guides(color = guide_legend(override.aes = list(size = 3))) + 
+    # Add annotation
+    geom_text(
+      data = stats_df,
+      aes(x = x, y = y, label = label),
+      inherit.aes = FALSE,
+      size = 4,       
+      fontface = "bold",
+      hjust = 0.5
+    ) +
+    
+    theme_classic() + 
+    theme(
+      legend.position = "bottom",
+      plot.title = element_text(hjust = 0.5, face="bold", size=16),
+      text = element_text(face="bold", size = 14),
+      axis.text.x = element_blank()
+    ) +
+    scale_color_manual(name = "Cohort", values = grp.colors)
+  return(g)
+}
+
+set.seed('1234')
+aml_fig <- makeFig("De novo AML")
+aml_fig
+tall_fig <- makeFig("T-ALL")
+tall_fig
+dsaml_fig <- makeFig("DS-AML")
+dsaml_fig
+tam_fig <- makeFig("TAM")
+tam_fig
+```
+This analysis indicates that de novo AML has a higher amount of deleterious rare variants in all categories, with the most pronounced differences in established genes and candidate, constrained genes. We observe a similar pattern in T-ALL. Down-syndrome AML and TAM are not significant in any gene category, although small sample size limits detection in these groups.
+
+
+
+# Key Interpretation Points
+ - Strongest evidence appears in:
+     * Established AD genes
+     * Constrained candidate genes
+ - Weaker signal in random genes supports specificity
+ - Differences across cohorts (T-ALL, AML, DS-AML, TAM) may reflect biology or differences in sequencing/ascertainment
+     * We note that a lower burden of predicted deleterious variants was observed in the Down syndrome AML and TAM cohorts, which were processed identically to the de novo AML cohort. Because individuals with Down syndrome have a markedly increased leukemia risk conferred by trisomy 21, this internal comparison, free from cross-cohort technical heterogeneity, provides some reassurance that observed differences in germline variant burden are not purely based on technical differences.
+
+# Limitations
+ - Residual batch effects (sequencing, ascertainment) may remain
+ - Rare variant definition and annotation thresholds influence results
+ - Small sample sizes can increase variance in bootstrap estimates
+ - LOEUF thresholds are heuristic, not absolute
+
+# Summary
+
+This analysis tests whether germline deleterious variants are enriched in AML, DS-AML/TAM, and T-ALL patients.
+By combining biologically informed gene sets, constraint metrics, and robust resampling, it aims to distinguish true predisposition signal from technical or random variation.
+

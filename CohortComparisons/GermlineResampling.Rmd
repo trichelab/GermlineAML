@@ -1,0 +1,106 @@
+---
+title: "Germline variant analysis via resampling"
+output: html_document
+date: "2025-03-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The following documentation shows the methodology for the meta-analysis of germline variants in acute myeloid leukemia and myelodysplastic syndromes as described in Harmon, et. al, 2025: "Germline Variant Burden Warrants Universal Genetic Testing in Pediatric Myeloid Leukemia".
+
+The purpose of this analysis is to assess the aggregate prevalence of pathogenic/likely pathogenic (P/LP) variants annotated according to the American College of Medical Genetics and Genomics/Association of Molecular Pathology guidelines (ACMG/AMP) im myeloid malignancy patients across independent cohorts, including acute myeloid leukemia (AML) and myelodysplastic syndrome (MDS). To investigate this, we compared the percentage of patients that have a P/LP germline variant related to hematopoietic malignancy predisposition within published cohorts of patients.
+
+We collected and harmonized several large WGS/WES studies to investigate P/LP variants in acute myeloid leukemia and myelodysplastic syndrome. We note that these studies vary in design, population characteristics, sequencing approaches (e.g., WGS vs. WES), and analytical pipelines. Such heterogeneity is inherent to the current body of published genomic studies. The goal of the meta-analysis is therefore not to assume methodological uniformity or to derive a precise population-level prevalence estimate, but rather to assess whether the aggregate evidence across independent cohorts supports a consistent signal.This document shows the statistical methodology employed using resampling. 
+
+## Resampling-based inference of germline prevalence
+
+We used a non-parametric approach, which is to resample over and over without replacement. The advantage of this approach is that resampling makes no assumptions about the underlying distribution of the data. 
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+combined <- read.csv("pan_myeloid_malignancy_PLP.csv")
+combined$Group <- paste(combined$AgeGroup, gsub("\\-", "", combined$Lineage))
+table(combined$Group)
+combined$Group <- factor(combined$Group, levels=c("Adult AML","Pediatric AML","Adult MDS","Pediatric MDS"))
+byGroup <- split(combined$G_PLP, combined$Group)
+
+rs <- function(y, n, m) replicate(m, sum(y[sample.int(n=length(y),size=n)]>0)/n)
+
+library(reshape2)
+results <- melt(data.frame(lapply(byGroup, rs, n=200, m=4000)), 
+                variable.name="Group", value.name="Burden")
+
+library(ggplot2)
+library(ggbeeswarm)
+
+results$Group <- gsub("\\."," ",results$Group)
+results$Group <- factor(results$Group, levels=c("Adult AML","Pediatric AML","Adult MDS","Pediatric MDS"))
+grp.colors <- c("Adult AML"="#0f0d91","Pediatric AML"="#458EF7","Adult MDS" = "#137c3b", "Pediatric MDS" = "#86dfa8")
+ggplot(results, aes(x=Group, y=Burden, color=Group)) + 
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.2),
+                     breaks = seq(0, .2, .025)) + ylab("Patients with a P/LP Variant (%)") +
+  scale_color_manual(values =grp.colors)+
+  geom_hline(yintercept=0.05, lty=3) + geom_quasirandom(size=0.3) + 
+  theme_classic() + theme(legend.position="none") +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1, hjust=1))+
+  theme(text=element_text(face="bold",size = 14)) 
+
+
+```
+
+Make a table of the number of P/LP variant carriers and confidence intervals (derived from the empirical percentiles of this distribution (95% CI: 2.5th–97.5th percentiles).
+```{r, warning=FALSE, message=FALSE}
+summary_table <- combined %>%
+  group_by(Group) %>%
+  summarise(
+    N = n_distinct(X),
+    n = n_distinct(X[G_PLP > 0]),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    results %>%
+      group_by(Group) %>%
+      summarise(
+        median = median(Burden),
+        lower = quantile(Burden, 0.025),
+        upper = quantile(Burden, 0.975),
+        .groups = "drop"
+      ),
+    by = "Group"
+  ) %>%
+  mutate(
+    `Patients with ≥1 P/LP variant` = paste0(n, "/", N),
+    `Germline burden, % (95% CI)` = sprintf(
+      "%.1f%% (%.1f–%.1f%%)",
+      100*median, 100*lower, 100*upper
+    )
+  ) %>%
+  select(
+    Cohort = Group,
+    `Patients with ≥1 P/LP variant`,
+    `Germline burden, % (95% CI)`
+  )
+
+library(gt)
+
+pub_table <- summary_table %>%
+  gt() %>%
+  cols_align(
+    align = "center",
+    -Cohort
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    column_labels.font.weight = "bold"
+  )
+
+pub_table
+```
+
+## Session information 
+
+```{r}
+sessionInfo()
+```
